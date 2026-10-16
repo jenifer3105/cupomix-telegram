@@ -23,11 +23,16 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
           SHOPEE_SECRET: ${{ secrets.SHOPEE_SECRET }}
+
         run: |
           python3 -m pip install requests
 
           cat > /tmp/enviar.py <<'PY'
-          import os, json, time, hashlib, requests
+          import os
+          import json
+          import time
+          import hashlib
+          import requests
           from pathlib import Path
 
           app_id = os.environ["SHOPEE_APP_ID"]
@@ -36,12 +41,14 @@ jobs:
           chat = os.environ["CHAT_ID"]
 
           historico_path = Path("historico.json")
+
           try:
               historico = json.loads(historico_path.read_text())
-          except Exception:
+          except (FileNotFoundError, json.JSONDecodeError):
               historico = []
 
           timestamp = int(time.time())
+
           query = """
           query {
             productOfferV2(page: 1, limit: 50) {
@@ -54,7 +61,12 @@ jobs:
             }
           }
           """
-          payload = json.dumps({"query": query}, separators=(",", ":"))
+
+          payload = json.dumps(
+              {"query": query},
+              separators=(",", ":")
+          )
+
           assinatura = hashlib.sha256(
               (app_id + str(timestamp) + payload + secret).encode()
           ).hexdigest()
@@ -62,44 +74,70 @@ jobs:
           headers = {
               "Content-Type": "application/json",
               "Authorization": (
-                  f"SHA256 Credential={app_id}, Timestamp={timestamp}, "
+                  f"SHA256 Credential={app_id}, "
+                  f"Timestamp={timestamp}, "
                   f"Signature={assinatura}"
               )
           }
 
-          resposta = requests.post(
-              "https://open-api.affiliate.shopee.com.br/graphql",
-              headers=headers, data=payload, timeout=30
+          url_shopee = (
+              "https://open-api.affiliate.shopee.com.br/graphql"
           )
+
+          resposta = requests.post(
+              url_shopee,
+              headers=headers,
+              data=payload,
+              timeout=30
+          )
+
           resposta.raise_for_status()
           dados = resposta.json()
 
           if "errors" in dados:
-              raise RuntimeError(json.dumps(dados["errors"], ensure_ascii=False))
+              raise RuntimeError(
+                  json.dumps(dados["errors"], ensure_ascii=False)
+              )
 
-          produtos = dados.get("data", {}).get(
-              "productOfferV2", {}
-          ).get("nodes", [])
+          produtos = (
+              dados.get("data", {})
+              .get("productOfferV2", {})
+              .get("nodes", [])
+          )
 
           if not produtos:
-              raise RuntimeError("A Shopee não retornou produtos.")
+              raise RuntimeError(
+                  "A Shopee não retornou produtos."
+              )
+
+          historico = set(historico)
 
           produto = next(
-              (p for p in produtos
-               if p.get("productLink")
-               and p.get("productName")
-               and p.get("productLink") not in historico),
+              (
+                  p for p in produtos
+                  if p.get("productLink")
+                  and p.get("productName")
+                  and p.get("productLink") not in historico
+              ),
               None
           )
 
           if not produto:
               raise RuntimeError(
-                  "Não há produto novo nesta página. "
+                  "Não há produto novo entre os 50 resultados. "
                   "A consulta pode estar retornando sempre os mesmos itens."
               )
 
           nome = produto["productName"]
-          preco = produto.get("price", "")
+
+          try:
+              preco_numero = float(produto.get("price", 0))
+              preco = f"{preco_numero:.2f}".replace(".", ",")
+          except (ValueError, TypeError):
+              preco = str(produto.get("price", "Consulte na Shopee"))
+              if "." in preco:
+                  preco = preco.replace(".", ",")
+
           link = produto["productLink"]
           imagem = produto.get("imageUrl", "")
 
@@ -112,6 +150,7 @@ jobs:
           )
 
           base = f"https://api.telegram.org/bot{bot}/"
+
           if imagem:
               envio = requests.post(
                   base + "sendPhoto",
@@ -121,7 +160,10 @@ jobs:
                       "caption": legenda,
                       "reply_markup": json.dumps({
                           "inline_keyboard": [[
-                              {"text": "🛒 COMPRAR AGORA", "url": link}
+                              {
+                                  "text": "🛒 COMPRAR AGORA",
+                                  "url": link
+                              }
                           ]]
                       })
                   },
@@ -135,7 +177,10 @@ jobs:
                       "text": legenda + f"\n\n🛒 Comprar: {link}",
                       "reply_markup": json.dumps({
                           "inline_keyboard": [[
-                              {"text": "🛒 COMPRAR AGORA", "url": link}
+                              {
+                                  "text": "🛒 COMPRAR AGORA",
+                                  "url": link
+                              }
                           ]]
                       })
                   },
@@ -144,13 +189,23 @@ jobs:
 
           envio.raise_for_status()
           resultado = envio.json()
-          if not resultado.get("ok"):
-              raise RuntimeError(json.dumps(resultado, ensure_ascii=False))
 
-          historico.append(link)
+          if not resultado.get("ok"):
+              raise RuntimeError(
+                  json.dumps(resultado, ensure_ascii=False)
+              )
+
+          historico.add(link)
+
           historico_path.write_text(
-              json.dumps(historico[-500:], ensure_ascii=False, indent=2)
+              json.dumps(
+                  sorted(historico)[-500:],
+                  ensure_ascii=False,
+                  indent=2
+              )
           )
+
+          print("Oferta enviada com sucesso:", nome)
           PY
 
           python3 /tmp/enviar.py

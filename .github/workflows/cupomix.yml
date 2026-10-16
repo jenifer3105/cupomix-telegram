@@ -30,7 +30,55 @@ jobs:
           BOT_TOKEN = os.environ["BOT_TOKEN"]
           CHAT_ID = os.environ["CHAT_ID"]
 
-          timestamp = int(time.time())
+          SHOPEE_URL = "https://open-api.affiliate.shopee.com.br/graphql"
+
+          def shopee_request(payload):
+              timestamp = int(time.time())
+
+              factor = APP_ID + str(timestamp) + payload + SECRET
+
+              signature = hashlib.sha256(
+                  factor.encode()
+              ).hexdigest()
+
+              authorization = (
+                  f"SHA256 Credential={APP_ID}, "
+                  f"Timestamp={timestamp}, "
+                  f"Signature={signature}"
+              )
+
+              headers = {
+                  "Content-Type": "application/json",
+                  "Authorization": authorization
+              }
+
+              resposta = requests.post(
+                  SHOPEE_URL,
+                  headers=headers,
+                  data=payload,
+                  timeout=30
+              )
+
+              print("Shopee:", resposta.status_code)
+
+              if resposta.status_code != 200:
+                  raise Exception(
+                      f"Erro HTTP Shopee: {resposta.status_code}"
+                  )
+
+              dados = resposta.json()
+
+              if "errors" in dados:
+                  raise Exception(
+                      "Erro Shopee: "
+                      + json.dumps(dados["errors"])
+                  )
+
+              return dados
+
+          # ----------------------------------------
+          # 1. BUSCAR OFERTAS
+          # ----------------------------------------
 
           query = """
           query {
@@ -48,49 +96,12 @@ jobs:
           }
           """
 
-          payload = json.dumps({
-              "query": query
-          }, separators=(",", ":"))
-
-          factor = APP_ID + str(timestamp) + payload + SECRET
-
-          signature = hashlib.sha256(
-              factor.encode()
-          ).hexdigest()
-
-          authorization = (
-              f"SHA256 Credential={APP_ID}, "
-              f"Timestamp={timestamp}, "
-              f"Signature={signature}"
+          payload = json.dumps(
+              {"query": query},
+              separators=(",", ":")
           )
 
-          url = "https://open-api.affiliate.shopee.com.br/graphql"
-
-          headers = {
-              "Content-Type": "application/json",
-              "Authorization": authorization
-          }
-
-          resposta = requests.post(
-              url,
-              headers=headers,
-              data=payload,
-              timeout=30
-          )
-
-          print("Status Shopee:", resposta.status_code)
-          print(resposta.text)
-
-          if resposta.status_code != 200:
-              raise Exception("Erro ao consultar a Shopee")
-
-          dados = resposta.json()
-
-          if "errors" in dados:
-              raise Exception(
-                  "Erro da Shopee: "
-                  + json.dumps(dados["errors"])
-              )
+          dados = shopee_request(payload)
 
           produtos = (
               dados
@@ -99,36 +110,116 @@ jobs:
               .get("nodes", [])
           )
 
+          print("Produtos encontrados:", len(produtos))
+
           if not produtos:
               print("Nenhuma oferta encontrada.")
               exit()
 
+          # ----------------------------------------
+          # 2. ENVIAR CADA OFERTA
+          # ----------------------------------------
+
+          telegram_url = (
+              f"https://api.telegram.org/bot"
+              f"{BOT_TOKEN}/sendMessage"
+          )
+
           for produto in produtos:
 
-              nome = produto.get("productName", "Produto")
-              preco = produto.get("price", "")
-              imagem = produto.get("imageUrl", "")
-              link = produto.get("productLink", "")
+              nome = produto.get(
+                  "productName",
+                  "Produto"
+              )
 
-              mensagem = f"""
-          🔥 OFERTA NA SHOPEE 🔥
+              preco = produto.get(
+                  "price",
+                  ""
+              )
+
+              imagem = produto.get(
+                  "imageUrl",
+                  ""
+              )
+
+              link_original = produto.get(
+                  "productLink",
+                  ""
+              )
+
+              if not link_original:
+                  print("Produto sem link. Pulando.")
+                  continue
+
+              # ----------------------------------------
+              # 3. GERAR LINK DE AFILIADO
+              # ----------------------------------------
+
+              mutation = """
+              mutation {
+                generateShortLink(
+                  input: {
+                    originUrl: "%s"
+                    subIds: ["telegram", "cupomix"]
+                  }
+                ) {
+                  shortLink
+                }
+              }
+              """ % link_original.replace('"', '\\"')
+
+              affiliate_payload = json.dumps(
+                  {"query": mutation},
+                  separators=(",", ":")
+              )
+
+              try:
+                  affiliate_data = shopee_request(
+                      affiliate_payload
+                  )
+
+                  link_afiliado = (
+                      affiliate_data
+                      .get("data", {})
+                      .get("generateShortLink", {})
+                      .get("shortLink", "")
+                  )
+
+              except Exception as erro:
+                  print(
+                      "Erro ao gerar link afiliado:",
+                      erro
+                  )
+                  link_afiliado = ""
+
+              # Se não conseguiu gerar o afiliado,
+              # não manda o link normal por engano.
+              if not link_afiliado:
+                  print(
+                      "Não foi possível gerar link afiliado."
+                  )
+                  continue
+
+              # ----------------------------------------
+              # 4. MENSAGEM TELEGRAM
+              # ----------------------------------------
+
+              mensagem = f"""🔥 OFERTA NA SHOPEE 🔥
 
           🛍️ {nome}
 
           💰 Preço: R$ {preco}
 
-          👉 COMPRAR:
-          {link}
+          👉 COMPRAR AGORA:
+          {link_afiliado}
 
           ⚡ Aproveite antes que o preço mude!
 
-          🟠 Cupomix
-          """
+          🟠 Cupomix"""
 
-              telegram_url = (
-                  f"https://api.telegram.org/bot"
-                  f"{BOT_TOKEN}/sendMessage"
-              )
+              # ----------------------------------------
+              # 5. ENVIAR PARA TELEGRAM
+              # ----------------------------------------
 
               envio = requests.post(
                   telegram_url,
@@ -139,8 +230,17 @@ jobs:
                   timeout=30
               )
 
-              print("Telegram:", envio.status_code)
+              print(
+                  "Telegram:",
+                  envio.status_code
+              )
 
               if envio.status_code != 200:
                   print(envio.text)
+
+              # Pequena pausa entre mensagens
+              time.sleep(1)
+
+          print("Ofertas enviadas com sucesso!")
+
           PY

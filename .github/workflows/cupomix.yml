@@ -6,15 +6,141 @@ on:
     - cron: "*/15 * * * *"
 
 jobs:
-  enviar-teste:
+  enviar-ofertas:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Enviar mensagem para Telegram
+      - name: Buscar ofertas Shopee e enviar Telegram
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
+          SHOPEE_SECRET: ${{ secrets.SHOPEE_SECRET }}
+
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=✅ Cupomix funcionando pelo GitHub Actions!"
+          python3 <<'PY'
+          import os
+          import time
+          import json
+          import hashlib
+          import requests
+
+          APP_ID = os.environ["SHOPEE_APP_ID"]
+          SECRET = os.environ["SHOPEE_SECRET"]
+          BOT_TOKEN = os.environ["BOT_TOKEN"]
+          CHAT_ID = os.environ["CHAT_ID"]
+
+          timestamp = int(time.time())
+
+          query = """
+          query {
+            productOfferV2(
+              page: 1,
+              limit: 10
+            ) {
+              nodes {
+                productName
+                price
+                imageUrl
+                productLink
+              }
+            }
+          }
+          """
+
+          payload = json.dumps({
+              "query": query
+          }, separators=(",", ":"))
+
+          factor = APP_ID + str(timestamp) + payload + SECRET
+
+          signature = hashlib.sha256(
+              factor.encode()
+          ).hexdigest()
+
+          authorization = (
+              f"SHA256 Credential={APP_ID}, "
+              f"Timestamp={timestamp}, "
+              f"Signature={signature}"
+          )
+
+          url = "https://open-api.affiliate.shopee.com.br/graphql"
+
+          headers = {
+              "Content-Type": "application/json",
+              "Authorization": authorization
+          }
+
+          resposta = requests.post(
+              url,
+              headers=headers,
+              data=payload,
+              timeout=30
+          )
+
+          print("Status Shopee:", resposta.status_code)
+          print(resposta.text)
+
+          if resposta.status_code != 200:
+              raise Exception("Erro ao consultar a Shopee")
+
+          dados = resposta.json()
+
+          if "errors" in dados:
+              raise Exception(
+                  "Erro da Shopee: "
+                  + json.dumps(dados["errors"])
+              )
+
+          produtos = (
+              dados
+              .get("data", {})
+              .get("productOfferV2", {})
+              .get("nodes", [])
+          )
+
+          if not produtos:
+              print("Nenhuma oferta encontrada.")
+              exit()
+
+          for produto in produtos:
+
+              nome = produto.get("productName", "Produto")
+              preco = produto.get("price", "")
+              imagem = produto.get("imageUrl", "")
+              link = produto.get("productLink", "")
+
+              mensagem = f"""
+          🔥 OFERTA NA SHOPEE 🔥
+
+          🛍️ {nome}
+
+          💰 Preço: R$ {preco}
+
+          👉 COMPRAR:
+          {link}
+
+          ⚡ Aproveite antes que o preço mude!
+
+          🟠 Cupomix
+          """
+
+              telegram_url = (
+                  f"https://api.telegram.org/bot"
+                  f"{BOT_TOKEN}/sendMessage"
+              )
+
+              envio = requests.post(
+                  telegram_url,
+                  data={
+                      "chat_id": CHAT_ID,
+                      "text": mensagem
+                  },
+                  timeout=30
+              )
+
+              print("Telegram:", envio.status_code)
+
+              if envio.status_code != 200:
+                  print(envio.text)
+          PY

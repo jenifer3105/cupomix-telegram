@@ -6,75 +6,45 @@ on:
   schedule:
     - cron: "0 * * * *"
 
+permissions:
+  contents: write
+
 jobs:
   enviar-ofertas:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Buscar uma oferta Shopee e enviar Telegram
+      - name: Baixar histórico
+        uses: actions/checkout@v4
+
+      - name: Buscar oferta e enviar Telegram
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
           SHOPEE_SECRET: ${{ secrets.SHOPEE_SECRET }}
-
         run: |
-          python3 <<'PY'
-          import os
-          import time
-          import json
-          import hashlib
-          import random
-          import requests
+          python3 -m pip install requests
 
-          APP_ID = os.environ["SHOPEE_APP_ID"]
-          SECRET = os.environ["SHOPEE_SECRET"]
-          BOT_TOKEN = os.environ["BOT_TOKEN"]
-          CHAT_ID = os.environ["CHAT_ID"]
+          cat > /tmp/enviar.py <<'PY'
+          import os, json, time, hashlib, requests
+          from pathlib import Path
 
-          SHOPEE_URL = "https://open-api.affiliate.shopee.com.br/graphql"
+          app_id = os.environ["SHOPEE_APP_ID"]
+          secret = os.environ["SHOPEE_SECRET"]
+          bot = os.environ["BOT_TOKEN"]
+          chat = os.environ["CHAT_ID"]
 
-          def shopee_request(query):
-              timestamp = int(time.time())
+          historico_path = Path("historico.json")
+          try:
+              historico = json.loads(historico_path.read_text())
+          except Exception:
+              historico = []
 
-              payload = json.dumps(
-                  {"query": query},
-                  separators=(",", ":")
-              )
-
-              factor = APP_ID + str(timestamp) + payload + SECRET
-              signature = hashlib.sha256(
-                  factor.encode()
-              ).hexdigest()
-
-              authorization = (
-                  f"SHA256 Credential={APP_ID}, "
-                  f"Timestamp={timestamp}, "
-                  f"Signature={signature}"
-              )
-
-              response = requests.post(
-                  SHOPEE_URL,
-                  headers={
-                      "Content-Type": "application/json",
-                      "Authorization": authorization
-                  },
-                  data=payload,
-                  timeout=30
-              )
-
-              response.raise_for_status()
-              data = response.json()
-
-              if "errors" in data:
-                  raise Exception(json.dumps(data["errors"]))
-
-              return data
-
-          # Buscar até 10 produtos
+          timestamp = int(time.time())
           query = """
           query {
-            productOfferV2(page: 1, limit: 10) {
+            productOfferV2(page: 1, limit: 50) {
               nodes {
                 productName
                 price
@@ -84,95 +54,111 @@ jobs:
             }
           }
           """
+          payload = json.dumps({"query": query}, separators=(",", ":"))
+          assinatura = hashlib.sha256(
+              (app_id + str(timestamp) + payload + secret).encode()
+          ).hexdigest()
 
-          data = shopee_request(query)
-
-          products = (
-              data.get("data", {})
-                  .get("productOfferV2", {})
-                  .get("nodes", [])
-          )
-
-          if not products:
-              print("Nenhuma oferta encontrada.")
-              raise SystemExit(0)
-
-          # Escolher somente 1 produto
-          product = random.choice(products)
-
-          name = product.get("productName", "Produto")
-          price = product.get("price", "")
-          product_link = product.get("productLink", "")
-
-          if not product_link:
-              raise Exception("Produto sem link.")
-
-          # Gerar link de afiliado
-          escaped_link = json.dumps(product_link)
-
-          mutation = """
-          mutation {
-            generateShortLink(
-              input: {
-                originUrl: %s
-                subIds: ["telegram", "cupomix"]
-              }
-            ) {
-              shortLink
-            }
+          headers = {
+              "Content-Type": "application/json",
+              "Authorization": (
+                  f"SHA256 Credential={app_id}, Timestamp={timestamp}, "
+                  f"Signature={assinatura}"
+              )
           }
-          """ % escaped_link
 
-          affiliate_data = shopee_request(mutation)
+          resposta = requests.post(
+              "https://open-api.affiliate.shopee.com.br/graphql",
+              headers=headers, data=payload, timeout=30
+          )
+          resposta.raise_for_status()
+          dados = resposta.json()
 
-          affiliate_link = (
-              affiliate_data.get("data", {})
-              .get("generateShortLink", {})
-              .get("shortLink", "")
+          if "errors" in dados:
+              raise RuntimeError(json.dumps(dados["errors"], ensure_ascii=False))
+
+          produtos = dados.get("data", {}).get(
+              "productOfferV2", {}
+          ).get("nodes", [])
+
+          if not produtos:
+              raise RuntimeError("A Shopee não retornou produtos.")
+
+          produto = next(
+              (p for p in produtos
+               if p.get("productLink")
+               and p.get("productName")
+               and p.get("productLink") not in historico),
+              None
           )
 
-          if not affiliate_link:
-              raise Exception(
-                  "A Shopee não retornou o link de afiliado."
+          if not produto:
+              raise RuntimeError(
+                  "Não há produto novo nesta página. "
+                  "A consulta pode estar retornando sempre os mesmos itens."
               )
 
-          # Enviar uma única mensagem ao Telegram
-          message = f"""🔥 OFERTA NA SHOPEE 🔥
+          nome = produto["productName"]
+          preco = produto.get("price", "")
+          link = produto["productLink"]
+          imagem = produto.get("imageUrl", "")
 
-          🛍️ {name}
-
-          💰 Preço: R$ {price}
-
-          👉 COMPRAR AGORA:
-          {affiliate_link}
-
-          ⚡ Confira o preço e os cupons disponíveis na Shopee!
-
-          🟠 Cupomix"""
-
-          telegram_url = (
-              f"https://api.telegram.org/bot"
-              f"{BOT_TOKEN}/sendMessage"
+          legenda = (
+              f"🔥 OFERTA NA SHOPEE 🔥\n\n"
+              f"🛍️ {nome}\n\n"
+              f"💰 Preço informado: R$ {preco}\n\n"
+              f"⚡ Confira o preço e os cupons disponíveis na Shopee!\n\n"
+              f"🟠 Cupomix"
           )
 
-          response = requests.post(
-              telegram_url,
-              data={
-                  "chat_id": CHAT_ID,
-                  "text": message
-              },
-              timeout=30
-          )
-
-          response.raise_for_status()
-
-          result = response.json()
-
-          if not result.get("ok"):
-              raise Exception(
-                  "Erro Telegram: " + json.dumps(result)
+          base = f"https://api.telegram.org/bot{bot}/"
+          if imagem:
+              envio = requests.post(
+                  base + "sendPhoto",
+                  data={
+                      "chat_id": chat,
+                      "photo": imagem,
+                      "caption": legenda,
+                      "reply_markup": json.dumps({
+                          "inline_keyboard": [[
+                              {"text": "🛒 COMPRAR AGORA", "url": link}
+                          ]]
+                      })
+                  },
+                  timeout=30
+              )
+          else:
+              envio = requests.post(
+                  base + "sendMessage",
+                  data={
+                      "chat_id": chat,
+                      "text": legenda + f"\n\n🛒 Comprar: {link}",
+                      "reply_markup": json.dumps({
+                          "inline_keyboard": [[
+                              {"text": "🛒 COMPRAR AGORA", "url": link}
+                          ]]
+                      })
+                  },
+                  timeout=30
               )
 
-          print("Uma oferta foi enviada ao Telegram.")
+          envio.raise_for_status()
+          resultado = envio.json()
+          if not resultado.get("ok"):
+              raise RuntimeError(json.dumps(resultado, ensure_ascii=False))
 
+          historico.append(link)
+          historico_path.write_text(
+              json.dumps(historico[-500:], ensure_ascii=False, indent=2)
+          )
           PY
+
+          python3 /tmp/enviar.py
+
+      - name: Salvar histórico de produtos
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add historico.json
+          git diff --cached --quiet || git commit -m "Atualizar histórico de ofertas"
+          git push

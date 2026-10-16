@@ -1,219 +1,314 @@
 
-name: Cupomix Telegram
+name: Cupomix - Ofertas Shopee
 
 on:
-  workflow_dispatch:
   schedule:
     - cron: "0 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: cupomix-ofertas
+  cancel-in-progress: false
+
 jobs:
-  enviar-ofertas:
+  publicar-oferta:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Baixar histórico
+      - name: Baixar repositório
         uses: actions/checkout@v4
 
-      - name: Buscar oferta e enviar Telegram
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Buscar oferta e publicar somente com link afiliado válido
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
           SHOPEE_SECRET: ${{ secrets.SHOPEE_SECRET }}
-
         run: |
-          python3 -m pip install requests
-
-          cat > /tmp/enviar.py <<'PY'
+          python <<'PY'
           import os
           import json
-          import time
           import hashlib
+          import time
           import requests
           from pathlib import Path
+          from decimal import Decimal, InvalidOperation
 
-          app_id = os.environ["SHOPEE_APP_ID"]
-          secret = os.environ["SHOPEE_SECRET"]
-          bot = os.environ["BOT_TOKEN"]
-          chat = os.environ["CHAT_ID"]
+          API_URL = "https://open-api.affiliate.shopee.com.br/graphql"
+          TELEGRAM_URL = (
+              f"https://api.telegram.org/bot"
+              f"{os.environ['BOT_TOKEN']}"
+          )
+          HISTORY_FILE = Path("historico.json")
 
-          historico_path = Path("historico.json")
+          APP_ID = os.environ["SHOPEE_APP_ID"]
+          SECRET = os.environ["SHOPEE_SECRET"]
 
-          try:
-              historico = json.loads(historico_path.read_text())
-          except (FileNotFoundError, json.JSONDecodeError):
-              historico = []
+          def request_shopee(query):
+              timestamp = str(int(time.time()))
 
-          timestamp = int(time.time())
+              # A assinatura usa exatamente o corpo enviado.
+              body = json.dumps(
+                  {"query": query},
+                  separators=(",", ":"),
+                  ensure_ascii=False
+              )
 
-          query = """
-          query {
-            productOfferV2(page: 1, limit: 50) {
-              nodes {
-                productName
-                price
-                imageUrl
-                productLink
+              base = APP_ID + timestamp + body + SECRET
+              signature = hashlib.sha256(
+                  base.encode("utf-8")
+              ).hexdigest()
+
+              headers = {
+                  "Content-Type": "application/json",
+                  "Authorization": (
+                      f"SHA256 Credential={APP_ID}, "
+                      f"Timestamp={timestamp}, "
+                      f"Signature={signature}"
+                  )
               }
-            }
-          }
-          """
 
-          payload = json.dumps(
-              {"query": query},
-              separators=(",", ":")
-          )
-
-          assinatura = hashlib.sha256(
-              (app_id + str(timestamp) + payload + secret).encode()
-          ).hexdigest()
-
-          headers = {
-              "Content-Type": "application/json",
-              "Authorization": (
-                  f"SHA256 Credential={app_id}, "
-                  f"Timestamp={timestamp}, "
-                  f"Signature={assinatura}"
+              response = requests.post(
+                  API_URL,
+                  data=body.encode("utf-8"),
+                  headers=headers,
+                  timeout=30
               )
-          }
+              response.raise_for_status()
+              data = response.json()
 
-          url_shopee = (
-              "https://open-api.affiliate.shopee.com.br/graphql"
-          )
+              if data.get("errors"):
+                  raise RuntimeError(
+                      "Erro da API Shopee: " +
+                      json.dumps(data["errors"], ensure_ascii=False)
+                  )
 
-          resposta = requests.post(
-              url_shopee,
-              headers=headers,
-              data=payload,
-              timeout=30
-          )
+              return data.get("data") or {}
 
-          resposta.raise_for_status()
-          dados = resposta.json()
+          def gerar_link_afiliado(link_produto):
+              if not isinstance(link_produto, str):
+                  return None
 
-          if "errors" in dados:
-              raise RuntimeError(
-                  json.dumps(dados["errors"], ensure_ascii=False)
+              if not link_produto.startswith("https://"):
+                  return None
+
+              url_json = json.dumps(
+                  link_produto, ensure_ascii=False
               )
 
-          produtos = (
-              dados.get("data", {})
-              .get("productOfferV2", {})
-              .get("nodes", [])
-          )
-
-          if not produtos:
-              raise RuntimeError(
-                  "A Shopee não retornou produtos."
+              query = (
+                  'mutation { '
+                  'generateShortLink(input: { '
+                  f'originUrl: {url_json}, '
+                  'subIds: ["cupomix", "telegram"] '
+                  '}) { shortLink } '
+                  '}'
               )
 
-          historico = set(historico)
+              try:
+                  data = request_shopee(query)
+                  resultado = data.get("generateShortLink") or {}
+                  link_curto = resultado.get("shortLink")
 
-          produto = next(
-              (
-                  p for p in produtos
-                  if p.get("productLink")
-                  and p.get("productName")
-                  and p.get("productLink") not in historico
-              ),
-              None
-          )
+                  # Não aceita campo vazio ou link que não seja HTTPS.
+                  if not isinstance(link_curto, str):
+                      return None
 
-          if not produto:
-              raise RuntimeError(
-                  "Não há produto novo entre os 50 resultados. "
-                  "A consulta pode estar retornando sempre os mesmos itens."
+                  link_curto = link_curto.strip()
+
+                  if not link_curto.startswith("https://"):
+                      return None
+
+                  if any(c.isspace() for c in link_curto):
+                      return None
+
+                  # Exige domínio de link curto da Shopee.
+                  from urllib.parse import urlparse
+                  host = (urlparse(link_curto).hostname or "").lower()
+
+                  if not (
+                      host == "s.shopee.com.br"
+                      or host.endswith(".shope.ee")
+                      or host.endswith(".shopee.com.br")
+                  ):
+                      print("Link retornado não reconhecido como link curto Shopee.")
+                      return None
+
+                  return link_curto
+
+              except Exception as erro:
+                  print(f"Não foi possível gerar link afiliado: {erro}")
+                  return None
+
+          def enviar_telegram(metodo, dados):
+              response = requests.post(
+                  f"{TELEGRAM_URL}/{metodo}",
+                  json=dados,
+                  timeout=30
+              )
+              response.raise_for_status()
+              resultado = response.json()
+
+              if not resultado.get("ok"):
+                  raise RuntimeError(
+                      f"Telegram não aceitou a publicação: {resultado}"
+                  )
+
+              return resultado
+
+          def carregar_historico():
+              if not HISTORY_FILE.exists():
+                  return []
+              try:
+                  dados = json.loads(
+                      HISTORY_FILE.read_text(encoding="utf-8")
+                  )
+                  return dados if isinstance(dados, list) else []
+              except (json.JSONDecodeError, OSError):
+                  return []
+
+          historico = carregar_historico()
+          historico_set = set(historico)
+
+          produto_escolhido = None
+          link_afiliado_escolhido = None
+
+          # Busca produtos e só seleciona um depois de gerar
+          # com sucesso um link curto de afiliado.
+          for pagina in range(1, 11):
+              query = (
+                  'query { '
+                  'productOfferV2('
+                  f'page: {pagina}, limit: 50'
+                  ') { '
+                  'nodes { '
+                  'productName price imageUrl productLink '
+                  '} '
+                  '} '
+                  '}'
               )
 
-          nome = produto["productName"]
+              try:
+                  data = request_shopee(query)
+              except Exception as erro:
+                  print(f"Falha ao buscar produtos: {erro}")
+                  continue
+
+              resultado = data.get("productOfferV2") or {}
+              produtos = resultado.get("nodes") or []
+
+              for produto in produtos:
+                  link_original = produto.get("productLink")
+
+                  if not link_original or link_original in historico_set:
+                      continue
+
+                  # Regra principal: não publicar sem link afiliado.
+                  link_afiliado = gerar_link_afiliado(link_original)
+
+                  if not link_afiliado:
+                      print(
+                          "Oferta ignorada: não foi possível validar "
+                          "o link afiliado."
+                      )
+                      continue
+
+                  produto_escolhido = produto
+                  link_afiliado_escolhido = link_afiliado
+                  break
+
+              if produto_escolhido:
+                  break
+
+          if not produto_escolhido:
+              print(
+                  "Nenhuma oferta com link afiliado válido encontrada. "
+                  "Nada será publicado."
+              )
+              raise SystemExit(0)
+
+          produto = produto_escolhido
+          nome = str(produto.get("productName") or "Oferta Shopee").strip()
+          imagem = produto.get("imageUrl")
+          link_afiliado = link_afiliado_escolhido
 
           try:
-              preco_numero = float(produto.get("price", 0))
-              preco = f"{preco_numero:.2f}".replace(".", ",")
-          except (ValueError, TypeError):
-              preco = str(produto.get("price", "Consulte na Shopee"))
-              if "." in preco:
-                  preco = preco.replace(".", ",")
+              preco = Decimal(str(produto.get("price")))
+              if not preco.is_finite() or preco <= 0:
+                  raise InvalidOperation()
+              preco_formatado = f"{preco:.2f}".replace(".", ",")
+          except (InvalidOperation, ValueError, TypeError):
+              preco_formatado = None
 
-          link = produto["productLink"]
-          imagem = produto.get("imageUrl", "")
+          legenda = f"🔥 OFERTA SHOPEE 🔥\n\n{nome}\n"
 
-          legenda = (
-              f"🔥 OFERTA NA SHOPEE 🔥\n\n"
-              f"🛍️ {nome}\n\n"
-              f"💰 Preço informado: R$ {preco}\n\n"
-              f"⚡ Confira o preço e os cupons disponíveis na Shopee!\n\n"
-              f"🟠 Cupomix"
+          if preco_formatado:
+              legenda += f"\n💰 Preço: R$ {preco_formatado}\n"
+
+          legenda += (
+              "\n🛒 Link de afiliado:\n"
+              f"{link_afiliado}\n\n"
+              "📌 O preço e a disponibilidade podem mudar."
           )
 
-          base = f"https://api.telegram.org/bot{bot}/"
+          # Telegram permite até 1024 caracteres na legenda da foto.
+          legenda = legenda[:1000]
 
-          if imagem:
-              envio = requests.post(
-                  base + "sendPhoto",
-                  data={
-                      "chat_id": chat,
-                      "photo": imagem,
-                      "caption": legenda,
-                      "reply_markup": json.dumps({
-                          "inline_keyboard": [[
-                              {
-                                  "text": "🛒 COMPRAR AGORA",
-                                  "url": link
-                              }
-                          ]]
-                      })
-                  },
-                  timeout=30
-              )
+          teclado = {
+              "inline_keyboard": [[
+                  {
+                      "text": "🛒 COMPRAR AGORA",
+                      "url": link_afiliado
+                  }
+              ]]
+          }
+
+          # Não usa o link original em nenhum botão ou publicação.
+          if imagem and str(imagem).startswith("https://"):
+              resposta = enviar_telegram("sendPhoto", {
+                  "chat_id": os.environ["CHAT_ID"],
+                  "photo": imagem,
+                  "caption": legenda,
+                  "reply_markup": teclado
+              })
           else:
-              envio = requests.post(
-                  base + "sendMessage",
-                  data={
-                      "chat_id": chat,
-                      "text": legenda + f"\n\n🛒 Comprar: {link}",
-                      "reply_markup": json.dumps({
-                          "inline_keyboard": [[
-                              {
-                                  "text": "🛒 COMPRAR AGORA",
-                                  "url": link
-                              }
-                          ]]
-                      })
-                  },
-                  timeout=30
-              )
+              resposta = enviar_telegram("sendMessage", {
+                  "chat_id": os.environ["CHAT_ID"],
+                  "text": legenda,
+                  "reply_markup": teclado,
+                  "disable_web_page_preview": False
+              })
 
-          envio.raise_for_status()
-          resultado = envio.json()
-
-          if not resultado.get("ok"):
-              raise RuntimeError(
-                  json.dumps(resultado, ensure_ascii=False)
-              )
-
-          historico.add(link)
-
-          historico_path.write_text(
-              json.dumps(
-                  sorted(historico)[-500:],
-                  ensure_ascii=False,
-                  indent=2
-              )
+          # Registra no histórico somente depois da publicação.
+          historico.append(produto["productLink"])
+          HISTORY_FILE.write_text(
+              json.dumps(historico[-2000:], ensure_ascii=False, indent=2),
+              encoding="utf-8"
           )
 
-          print("Oferta enviada com sucesso:", nome)
+          print("Oferta publicada com link afiliado.")
+          print(f"Mensagem Telegram ID: {resposta['result']['message_id']}")
           PY
 
-          python3 /tmp/enviar.py
-
-      - name: Salvar histórico de produtos
+      - name: Salvar histórico de ofertas
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add historico.json
-          git diff --cached --quiet || git commit -m "Atualizar histórico de ofertas"
-          git push
+          if ! git diff --quiet -- historico.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add historico.json
+            git commit -m "Atualiza histórico de ofertas"
+            git push
+          else
+            echo "Nenhuma nova oferta publicada."
+          fi

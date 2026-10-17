@@ -1,0 +1,196 @@
+
+name: Robô de Cupons Shopee
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  cupons:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar arquivos
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install requests beautifulsoup4
+
+      - name: Buscar e publicar promoções
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import json
+          import html
+          import hashlib
+          import requests
+          import subprocess
+          from bs4 import BeautifulSoup
+          from pathlib import Path
+
+          token = os.environ["BOT_TOKEN"]
+          chat_id = os.environ["CHAT_ID"]
+          state_file = Path("cupons.json")
+          published = json.loads(state_file.read_text()) if state_file.exists() else []
+
+          sources = [
+              "cuponsvoltando",
+              "fadadoscupons",
+              "afiliadosshopeebroficial",
+          ]
+
+          session = requests.Session()
+          session.headers.update({
+              "User-Agent": "Mozilla/5.0"
+          })
+
+          seen = set(published)
+          new_items = []
+
+          keywords = re.compile(
+              r"cupom|cashback|moedas shopee|roleta|"
+              r"frete gr[aá]tis|frete gratis|resgate|"
+              r"desconto|off\b|promo[cç][aã]o|brinde|"
+              r"jogo|moedas|oferta", re.I
+          )
+
+          for channel in sources:
+              url = f"https://t.me/s/{channel}"
+              try:
+                  response = session.get(url, timeout=25)
+                  response.raise_for_status()
+                  soup = BeautifulSoup(response.text, "html.parser")
+              except Exception as exc:
+                  print(f"Falha ao consultar {channel}: {exc}")
+                  continue
+
+              messages = soup.select(".tgme_widget_message_wrap")
+
+              for message in messages:
+                  text_node = message.select_one(
+                      ".tgme_widget_message_text"
+                  )
+                  if not text_node:
+                      continue
+
+                  text = text_node.get_text(" ", strip=True)
+                  links = [
+                      a.get("href", "")
+                      for a in text_node.select("a[href]")
+                  ]
+
+                  all_text = text + " " + " ".join(links)
+                  if not keywords.search(all_text):
+                      continue
+
+                  shopee_links = [
+                      link for link in links
+                      if "shopee.com" in link.lower()
+                  ]
+
+                  # Publicar somente quando houver evidência de Shopee.
+                  if not shopee_links and not re.search(
+                      r"\bshopee\b", text, re.I
+                  ):
+                      continue
+
+                  code_match = re.search(
+                      r"(?:c[oó]digo\s*[:\-]?\s*)"
+                      r"([A-Z0-9]{5,25})|"
+                      r"\b([A-Z0-9]{7,20})\b",
+                      text,
+                      re.I
+                  )
+                  code = ""
+                  if code_match:
+                      code = next(
+                          (group for group in code_match.groups() if group),
+                          ""
+                      ).upper()
+
+                  # Deduplicar pelo código; sem código, usar a publicação.
+                  identity = (
+                      "code:" + code if code
+                      else "post:" + hashlib.sha256(
+                          (channel + text).encode()
+                      ).hexdigest()
+                  )
+
+                  if identity in seen:
+                      continue
+
+                  # Não enviar publicações sem link Shopee verificável.
+                  if not shopee_links:
+                      continue
+
+                  category = "🎟️ CUPOM SHOPEE"
+                  if re.search(r"cashback|dinheiro de volta", text, re.I):
+                      category = "💰 CASHBACK SHOPEE"
+                  elif re.search(r"moedas", text, re.I):
+                      category = "🪙 MOEDAS SHOPEE"
+                  elif re.search(r"roleta|jogo|brinde", text, re.I):
+                      category = "🎁 OPORTUNIDADE SHOPEE"
+                  elif re.search(r"frete gr[aá]tis|frete gratis", text, re.I):
+                      category = "🚚 FRETE GRÁTIS SHOPEE"
+
+                  safe_text = html.escape(text)
+                  safe_link = html.escape(shopee_links[0], quote=True)
+
+                  message_text = (
+                      f"<b>{category}</b>\n\n"
+                      f"{safe_text}\n\n"
+                      f'🔗 <a href="{safe_link}">Acessar oferta</a>'
+                  )
+
+                  try:
+                      result = session.post(
+                          f"https://api.telegram.org/bot{token}/sendMessage",
+                          data={
+                              "chat_id": chat_id,
+                              "text": message_text,
+                              "parse_mode": "HTML",
+                              "disable_web_page_preview": "false",
+                          },
+                          timeout=25
+                      )
+                      result.raise_for_status()
+                      if result.json().get("ok"):
+                          seen.add(identity)
+                          new_items.append(identity)
+                          print(f"Publicado: {channel} - {identity}")
+                  except Exception as exc:
+                      print(f"Falha ao publicar: {exc}")
+
+          state_file.write_text(
+              json.dumps(sorted(seen), ensure_ascii=False, indent=2) + "\n"
+          )
+
+          if new_items:
+              subprocess.run(
+                  ["git", "config", "user.name", "github-actions[bot]"],
+                  check=True
+              )
+              subprocess.run(
+                  ["git", "config", "user.email",
+                   "41898282+github-actions[bot]@users.noreply.github.com"],
+                  check=True
+              )
+              subprocess.run(["git", "add", "cupons.json"], check=True)
+              subprocess.run(
+                  ["git", "commit", "-m", "Atualizar cupons publicados"],
+                  check=True
+              )
+              subprocess.run(["git", "push"], check=True)
+          PY

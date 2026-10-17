@@ -102,6 +102,8 @@ jobs:
                   r"\b([A-Z0-9_-]{6,30})\s*:\s*R\$",
                   r"\b([A-Z0-9_-]{6,30})\s+(?=.{0,45}R\$\s*\d)",
                   r"R\$\s*\d+(?:[,.]\d+)?\s*OFF.{0,100}?\b([A-Z][A-Z0-9_-]{5,29})\b",
+                  # Código isolado em linha própria, com letras e números.
+                  r"(?<![A-Z0-9])([A-Z][A-Z0-9_-]{5,29})(?![A-Z0-9])",
               ]
               for padrao in padroes:
                   for resultado in re.finditer(padrao, texto, re.IGNORECASE):
@@ -160,7 +162,11 @@ jobs:
                   if not no_texto:
                       continue
                   texto = no_texto.get_text(" ", strip=True)
-                  if not re.search(r"\bcupom\b|\bc[oó]digo\b", texto, re.IGNORECASE):
+                  # Aceita cupons mesmo quando a mensagem não usa a palavra "cupom".
+                  if not re.search(
+                      r"\bcupom\b|\bc[oó]digo\b|R\$\s*\d+(?:[,.]\d+)?\s*OFF|\d+\s*%\s*OFF",
+                      texto, re.IGNORECASE
+                  ):
                       continue
                   if re.search(
                       r"turbine suas comiss[oõ]es|comiss[oõ]es? em vendas|"

@@ -9,10 +9,13 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: robo-cupons-shopee
+  cancel-in-progress: false
+
 jobs:
   cupons:
     runs-on: ubuntu-latest
-
     steps:
       - name: Baixar arquivos
         uses: actions/checkout@v4
@@ -35,7 +38,6 @@ jobs:
           import re
           import json
           import html
-          import hashlib
           import subprocess
           import requests
           from pathlib import Path
@@ -60,116 +62,115 @@ jobs:
               "afiliadosshopeebroficial",
           ]
 
-          palavras_invalidas = {
-              "SHOPEE", "SHOPE", "CUPOM", "CODIGO", "CÓDIGO",
-              "DISPON", "DISPONIVEL", "DISPONÍVEL", "DESCONTO",
-              "RESGATE", "CARRINHO", "OFERTA", "COMPRAS",
-              "VALIDO", "VÁLIDO", "PROMOCAO", "PROMOÇÃO",
-              "GRATIS", "GRÁTIS", "AFILIADO", "AFILIADA",
-              "PRODUTOS", "COMISSAO", "COMISSÃO", "ANUNCIO",
-              "ANÚNCIO", "LINK", "AQUI", "DINHEIRO", "VOLTOU",
-              "RESTAM", "USOS", "NINTENDO", "CUPONS", "VIP",
-              "NORMAL", "COD", "OFF", "PARA", "ACIMA",
-          }
-
           sessao = requests.Session()
           sessao.headers.update({
               "User-Agent": "Mozilla/5.0"
           })
 
-          novos = []
+          invalidos = {
+              "SHOPEE", "CUPOM", "CUPONS", "CODIGO", "CÓDIGO",
+              "DISPONIVEL", "DISPONÍVEL", "DESCONTO", "RESGATE",
+              "CARRINHO", "OFERTA", "COMPRAS", "VALIDO", "VÁLIDO",
+              "PROMOCAO", "PROMOÇÃO", "GRATIS", "GRÁTIS",
+              "AFILIADO", "AFILIADA", "PRODUTOS", "COMISSAO",
+              "COMISSÃO", "ANUNCIO", "ANÚNCIO", "LINK", "AQUI",
+              "DINHEIRO", "VOLTOU", "RESTAM", "USOS", "NINTENDO",
+              "NORMAL", "VIP", "DISPON", "RESGATAR", "COD",
+          }
 
           def extrair_codigo(texto):
-              candidatos = []
-
+              # Primeiro procura códigos identificados explicitamente.
               padroes = [
-                  r"(?:código|codigo)\s*(?:do cupom)?\s*"
-                  r"[:\-]?\s*([A-Z0-9_-]{5,25})",
+                  r"(?:código|codigo)\s*(?:do\s+cupom)?"
+                  r"\s*[:=\-]?\s*([A-Z0-9_-]{5,30})",
 
-                  r"\bcupom\s*[:\-]\s*([A-Z0-9_-]{5,25})",
+                  r"\bcupom\s*[:=\-]\s*([A-Z0-9_-]{5,30})",
 
-                  r"\b([A-Z0-9_-]{6,25})\s*"
-                  r"(?::\s*R\$|\s+R\$)",
+                  r"\b([A-Z0-9_-]{6,30})\s*:\s*R\$",
+
+                  r"\b([A-Z0-9_-]{6,30})\s+"
+                  r"(?=.{0,35}R\$\s*\d)",
 
                   r"R\$\s*\d+(?:[,.]\d+)?\s*OFF"
-                  r".{0,100}?\b([A-Z][A-Z0-9_-]{5,24})\b",
-
-                  r"\b([A-Z][A-Z0-9_-]{5,24})\b"
-                  r".{0,50}?\b(?:resgate|válido|valido)\b",
+                  r".{0,100}?\b([A-Z][A-Z0-9_-]{5,29})\b",
               ]
 
               for padrao in padroes:
-                  for achado in re.finditer(
+                  for resultado in re.finditer(
                       padrao, texto, re.IGNORECASE
                   ):
-                      candidato = achado.group(1).upper().strip()
+                      codigo = resultado.group(1).upper().strip()
+                      codigo = codigo.strip("_-")
 
-                      if candidato in palavras_invalidas:
+                      if codigo in invalidos:
+                          continue
+                      if not re.search(r"[A-Z]", codigo):
+                          continue
+                      if not re.search(r"\d", codigo):
+                          continue
+                      if not 6 <= len(codigo) <= 30:
                           continue
 
-                      if not re.search(r"[A-Z]", candidato):
-                          continue
-
-                      if not re.search(r"\d", candidato):
-                          continue
-
-                      if len(candidato) < 6:
-                          continue
-
-                      candidatos.append(candidato)
-
-              return candidatos[0] if candidatos else None
-
-          def classificar_tipo(texto):
-              if re.search(
-                  r"\bVIP\b|cupom exclusivo para membros",
-                  texto,
-                  re.IGNORECASE
-              ):
-                  return "💎 CUPOM VIP"
-
-              return "🎟️ CUPOM NORMAL"
-
-          def extrair_desconto(texto):
-              desconto = re.search(
-                  r"R\$\s*\d+(?:[,.]\d+)?\s*OFF"
-                  r"(?:\s+em\s+R\$\s*\d+(?:[,.]\d+)?)?",
-                  texto,
-                  re.IGNORECASE
-              )
-
-              if desconto:
-                  return desconto.group(0)
-
-              percentual = re.search(
-                  r"\d+\s*%\s*OFF",
-                  texto,
-                  re.IGNORECASE
-              )
-
-              if percentual:
-                  return percentual.group(0)
+                      return codigo
 
               return None
 
+          def extrair_desconto(texto):
+              resultado = re.search(
+                  r"R\$\s*\d+(?:[,.]\d+)?\s*OFF"
+                  r"(?:\s*(?:em|acima de|a partir de)\s*"
+                  r"R\$\s*\d+(?:[,.]\d+)?)?",
+                  texto,
+                  re.IGNORECASE,
+              )
+              if resultado:
+                  return resultado.group(0).strip()
+
+              resultado = re.search(
+                  r"\d+\s*%\s*OFF",
+                  texto,
+                  re.IGNORECASE,
+              )
+              return resultado.group(0).strip() if resultado else None
+
           def extrair_minimo(texto):
               resultado = re.search(
-                  r"(?:em compras acima de|"
-                  r"em compras a partir de|"
-                  r"acima de|a partir de|"
-                  r"mínimo de|minimo de)\s*"
-                  r"(R\$\s*\d+(?:[,.]\d+)?)",
+                  r"(?:em compras acima de|em compras a partir de|"
+                  r"acima de|a partir de|mínimo de|minimo de|"
+                  r"em compras de|em)\s*R\$\s*"
+                  r"\d+(?:[,.]\d+)?",
                   texto,
-                  re.IGNORECASE
+                  re.IGNORECASE,
               )
+              if resultado:
+                  valor = re.search(
+                      r"R\$\s*\d+(?:[,.]\d+)?",
+                      resultado.group(0),
+                      re.IGNORECASE,
+                  )
+                  return valor.group(0) if valor else None
+              return None
 
-              return resultado.group(1) if resultado else None
+          def classificar_tipo(texto):
+              if re.search(
+                  r"\bVIP\b|exclusivo para membros|"
+                  r"cupom vip|cupom exclusivo",
+                  texto,
+                  re.IGNORECASE,
+              ):
+                  return "💎 CUPOM VIP"
+              return "🎟️ CUPOM NORMAL"
+
+          total_novos = []
 
           for canal in canais:
-              url = f"https://t.me/s/{canal}"
+              print(f"Consultando canal: {canal}")
 
               try:
-                  resposta = sessao.get(url, timeout=25)
+                  resposta = sessao.get(
+                      f"https://t.me/s/{canal}",
+                      timeout=30,
+                  )
                   resposta.raise_for_status()
                   soup = BeautifulSoup(
                       resposta.text, "html.parser"
@@ -186,32 +187,33 @@ jobs:
                   no_texto = postagem.select_one(
                       ".tgme_widget_message_text"
                   )
-
                   if not no_texto:
                       continue
 
                   texto = no_texto.get_text(" ", strip=True)
 
-                  # Só aceitar publicações relacionadas a cupons.
+                  # Só aceita publicações que falem de cupom.
                   if not re.search(
-                      r"\bcupom\b|\bcódigo\b|\bcodigo\b",
+                      r"\bcupom\b|\bc[oó]digo\b",
                       texto,
-                      re.IGNORECASE
+                      re.IGNORECASE,
                   ):
                       continue
 
-                  # Ignorar anúncios de comissão e divulgações
-                  # comerciais que não sejam cupons.
+                  # Exclui anúncios de comissão e divulgações comerciais.
                   if re.search(
-                      r"comissão em vendas|comissao em vendas|"
-                      r"turbine suas comissões|turbine suas comissoes|"
+                      r"turbine suas comiss[oõ]es|"
+                      r"comiss[oõ]es? em vendas|"
                       r"oportunidade de gerar cliques|"
-                      r"produtos selecionados.*comissão",
+                      r"produtos selecionados.*comiss[oã]o|"
+                      r"comiss[oã]o.*redes sociais",
                       texto,
-                      re.IGNORECASE
+                      re.IGNORECASE,
                   ):
+                      print("Ignorado: anuncio comercial")
                       continue
 
+                  # Extrai links apenas da publicação atual.
                   links = [
                       a.get("href", "")
                       for a in no_texto.select("a[href]")
@@ -220,27 +222,33 @@ jobs:
                   links_shopee = [
                       link for link in links
                       if re.search(
-                          r"(^https?://)?"
-                          r"([a-z0-9-]+\.)*shopee\.com(\.br)?",
+                          r"^https?://(?:[a-z0-9-]+\.)*"
+                          r"shopee\.com(?:\.br)?(?:/|$|\?)",
                           link,
-                          re.IGNORECASE
+                          re.IGNORECASE,
                       )
                   ]
 
-                  # Sem link Shopee de resgate, não publicar.
                   if not links_shopee:
                       print(
                           f"Ignorado sem link Shopee: {canal}"
                       )
                       continue
 
-                  desconto = extrair_desconto(texto)
                   codigo = extrair_codigo(texto)
+                  desconto = extrair_desconto(texto)
 
-                  # Exigir código real e desconto identificado.
-                  if not codigo or not desconto:
+                  if not codigo:
                       print(
-                          f"Ignorado: cupom incompleto em {canal}"
+                          f"Ignorado: codigo nao identificado "
+                          f"em {canal}"
+                      )
+                      continue
+
+                  if not desconto:
+                      print(
+                          f"Ignorado: desconto nao identificado "
+                          f"para {codigo}"
                       )
                       continue
 
@@ -253,15 +261,13 @@ jobs:
                   tipo = classificar_tipo(texto)
                   minimo = extrair_minimo(texto)
 
-                  valor_html = html.escape(desconto)
-                  codigo_html = html.escape(codigo)
-                  link = html.escape(
-                      links_shopee[0], quote=True
-                  )
+                  # Link original de resgate fornecido pela publicação.
+                  link = links_shopee[0]
 
                   mensagem = (
                       f"<b>{tipo}</b>\n\n"
-                      f"💸 <b>Desconto:</b> {valor_html}\n"
+                      f"💸 <b>Desconto:</b> "
+                      f"{html.escape(desconto)}\n"
                   )
 
                   if minimo:
@@ -272,9 +278,9 @@ jobs:
 
                   mensagem += (
                       f"\n🏷️ <b>Código do cupom:</b>\n"
-                      f"<code>{codigo_html}</code>\n\n"
-                      f'✅ <a href="{link}">'
-                      f"RESGATAR CUPOM</a>\n\n"
+                      f"<code>{html.escape(codigo)}</code>\n\n"
+                      "⚠️ Confira as condições e a disponibilidade "
+                      "do cupom na Shopee.\n\n"
                       "🧡 <i>Cupomix • Seus achadinhos favoritos</i>"
                   )
 
@@ -287,19 +293,25 @@ jobs:
                               "text": mensagem,
                               "parse_mode": "HTML",
                               "disable_web_page_preview": True,
+                              "reply_markup": {
+                                  "inline_keyboard": [[
+                                      {
+                                          "text": "✅ RESGATAR CUPOM",
+                                          "url": link,
+                                      }
+                                  ]]
+                              },
                           },
-                          timeout=25
+                          timeout=30,
                       )
-
                       envio.raise_for_status()
                       resultado = envio.json()
 
                       if resultado.get("ok"):
                           publicados.add(identidade)
-                          novos.append(identidade)
+                          total_novos.append(identidade)
                           print(
-                              f"Cupom publicado: {codigo} "
-                              f"({tipo})"
+                              f"Publicado: {codigo} - {tipo}"
                           )
                       else:
                           print(
@@ -316,34 +328,36 @@ jobs:
               json.dumps(
                   sorted(publicados),
                   ensure_ascii=False,
-                  indent=2
+                  indent=2,
               ) + "\n",
-              encoding="utf-8"
+              encoding="utf-8",
           )
 
-          if novos:
+          if total_novos:
               subprocess.run(
                   ["git", "config", "user.name",
                    "github-actions[bot]"],
-                  check=True
+                  check=True,
               )
               subprocess.run(
                   ["git", "config", "user.email",
                    "41898282+github-actions[bot]@users.noreply.github.com"],
-                  check=True
+                  check=True,
               )
               subprocess.run(
                   ["git", "add", "robo_cupons/cupons.json"],
-                  check=True
+                  check=True,
               )
+
               subprocess.run(
                   ["git", "commit", "-m",
-                   "Atualizar cupons publicados"],
-                  check=True
+                   "Atualizar historico de cupons"],
+                  check=True,
               )
               subprocess.run(["git", "push"], check=True)
 
           print(
-              f"Execução concluída. Novos cupons: {len(novos)}"
+              f"Execucao concluida. Novos cupons: "
+              f"{len(total_novos)}"
           )
           PY

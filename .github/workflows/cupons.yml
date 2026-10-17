@@ -42,14 +42,12 @@ jobs:
 
           token = os.environ["BOT_TOKEN"]
           chat_id = os.environ["CHAT_ID"]
-          arquivo = Path("cupons.json")
+          arquivo = Path("robo_cupons/cupons.json")
+          arquivo.parent.mkdir(parents=True, exist_ok=True)
 
-          if arquivo.exists():
-              try:
-                  publicados = set(json.loads(arquivo.read_text(encoding="utf-8")))
-              except (json.JSONDecodeError, OSError):
-                  publicados = set()
-          else:
+          try:
+              publicados = set(json.loads(arquivo.read_text(encoding="utf-8")))
+          except (FileNotFoundError, json.JSONDecodeError, OSError):
               publicados = set()
 
           canais = [
@@ -62,21 +60,27 @@ jobs:
           sessao.headers.update({"User-Agent": "Mozilla/5.0"})
           novos = []
 
-          for canal in canais:
-              url = f"https://t.me/s/{canal}"
+          # Exige contexto explícito de cupom e um código associado.
+          padroes_codigo = [
+              r"(?:c[oó]digo|cupom)\s*[:\-]?\s*([A-Z0-9]{5,25})",
+              r"\b([A-Z0-9]{7,20})\s*:\s*R\$\s*\d",
+          ]
 
+          for canal in canais:
               try:
-                  resposta = sessao.get(url, timeout=25)
+                  resposta = sessao.get(
+                      f"https://t.me/s/{canal}", timeout=25
+                  )
                   resposta.raise_for_status()
                   soup = BeautifulSoup(resposta.text, "html.parser")
               except Exception as erro:
                   print(f"Erro ao consultar {canal}: {erro}")
                   continue
 
-              mensagens = soup.select(".tgme_widget_message_wrap")
-
-              for postagem in mensagens:
-                  no_texto = postagem.select_one(".tgme_widget_message_text")
+              for postagem in soup.select(".tgme_widget_message_wrap"):
+                  no_texto = postagem.select_one(
+                      ".tgme_widget_message_text"
+                  )
                   if not no_texto:
                       continue
 
@@ -85,50 +89,61 @@ jobs:
                       a.get("href", "")
                       for a in no_texto.select("a[href]")
                   ]
-
                   links_shopee = [
                       link for link in links
-                      if "shopee.com" in link.lower()
+                      if re.search(r"shopee\.com", link, re.I)
                   ]
 
-                  if not links_shopee:
-                      continue
-
+                  # Só aceita publicações com contexto claro de cupom.
                   if not re.search(
-                      r"shopee|cupom|c[oó]digo|off\b|desconto|"
-                      r"frete gr[aá]tis|promo[cç][aã]o",
+                      r"\bcupom\b|\bc[oó]digo\b|\bR\$\s*\d.*\bOFF\b|"
+                      r"\b\d+\s*%\s*OFF\b",
                       texto,
                       re.I,
                   ):
                       continue
 
-                  codigo_match = re.search(
-                      r"\b[A-Z0-9]{7,20}\b",
-                      texto.upper(),
-                  )
-                  codigo = codigo_match.group(0) if codigo_match else ""
+                  codigo = None
+                  for padrao in padroes_codigo:
+                      achado = re.search(padrao, texto, re.I)
+                      if achado:
+                          candidato = achado.group(1).upper()
+                          if candidato not in {
+                              "SHOPEE", "CUPOM", "CODIGO", "CÓDIGO"
+                          }:
+                              codigo = candidato
+                              break
 
-                  if codigo:
-                      identidade = "codigo:" + codigo
-                  else:
-                      identidade = "post:" + hashlib.sha256(
-                          (canal + texto).encode("utf-8")
-                      ).hexdigest()
+                  # Sem código explícito, não publica.
+                  if not codigo:
+                      print(f"Ignorado: sem código explícito ({canal})")
+                      continue
 
+                  identidade = "codigo:" + codigo
                   if identidade in publicados:
                       continue
 
-                  categoria = "🎟️ CUPOM SHOPEE"
-                  if re.search(r"frete gr[aá]tis", texto, re.I):
-                      categoria = "🚚 FRETE GRÁTIS SHOPEE"
+                  # Só publica quando houver link Shopee.
+                  if not links_shopee:
+                      print(f"Ignorado: sem link Shopee ({codigo})")
+                      continue
 
-                  texto_seguro = html.escape(texto[:3000])
-                  link_seguro = html.escape(links_shopee[0], quote=True)
+                  desconto = re.search(
+                      r"R\$\s*\d+(?:[,.]\d+)?\s*OFF"
+                      r"(?:\s+em\s+R\$\s*\d+(?:[,.]\d+)?)?",
+                      texto,
+                      re.I,
+                  )
+                  valor = desconto.group(0) if desconto else "Cupom Shopee"
+
+                  codigo_html = html.escape(codigo)
+                  link_html = html.escape(links_shopee[0], quote=True)
 
                   mensagem = (
-                      f"<b>{categoria}</b>\n\n"
-                      f"{texto_seguro}\n\n"
-                      f'<a href="{link_seguro}">🔗 Acessar oferta</a>'
+                      "🎟️ <b>CUPOM SHOPEE</b> 🎟️\n\n"
+                      f"💸 <b>{html.escape(valor)}</b>\n\n"
+                      f"🏷️ <b>Código:</b> <code>{codigo_html}</code>\n\n"
+                      f'✅ <a href="{link_html}">RESGATAR CUPOM</a>'
                   )
 
                   try:
@@ -138,6 +153,7 @@ jobs:
                               "chat_id": chat_id,
                               "text": mensagem,
                               "parse_mode": "HTML",
+                              "disable_web_page_preview": "true",
                           },
                           timeout=25,
                       )
@@ -146,12 +162,12 @@ jobs:
                       if envio.json().get("ok"):
                           publicados.add(identidade)
                           novos.append(identidade)
-                          print(f"Cupom publicado: {identidade}")
+                          print(f"Publicado: {codigo}")
                       else:
-                          print(f"Telegram recusou a mensagem: {envio.text}")
+                          print(f"Erro do Telegram: {envio.text}")
 
                   except Exception as erro:
-                      print(f"Erro ao publicar cupom: {erro}")
+                      print(f"Erro ao publicar {codigo}: {erro}")
 
           arquivo.write_text(
               json.dumps(sorted(publicados), ensure_ascii=False, indent=2) + "\n",
@@ -170,12 +186,14 @@ jobs:
                   ],
                   check=True,
               )
-              subprocess.run(["git", "add", "cupons.json"], check=True)
+              subprocess.run(
+                  ["git", "add", "robo_cupons/cupons.json"], check=True
+              )
               subprocess.run(
                   ["git", "commit", "-m", "Atualizar cupons publicados"],
                   check=True,
               )
               subprocess.run(["git", "push"], check=True)
 
-          print(f"Execucao concluida. Novos cupons: {len(novos)}")
+          print(f"Concluído. Novos cupons: {len(novos)}")
           PY

@@ -117,42 +117,59 @@ jobs:
 
               return prioritarios + outros
 
-          def extrair_codigo(texto):
-              # Primeiro, prioriza rótulos explícitos e formatos conhecidos dos canais.
-              padroes = [
-                  r"(?:código|codigo)\s*(?:do\s+cupom)?\s*[:=\-]?\s*([A-Z0-9_-]{6,30})",
-                  r"\bcupom\s*[:=\-]\s*([A-Z0-9_-]{6,30})",
-                  r"\b([A-Z0-9_-]{6,30})\s*:\s*R\$\s*\d",
-                  # Ex.: D1AD3CUPOM10 antes de "Restam X% dos usos".
-                  r"\b([A-Z][A-Z0-9_-]{5,29})\b(?=.{0,45}(?:restam|usos|válido|valido|expira))",
-                  # Ex.: código antes do desconto na mesma linha.
-                  r"\b([A-Z][A-Z0-9_-]{5,29})\s*[:\-]\s*R\$\s*\d",
-                  # Ex.: "R$20 OFF em R$60: 4DMD4CUPOM".
-                  r"R\$\s*\d+(?:[,.]\d+)?\s*OFF.{0,70}?\b([A-Z][A-Z0-9_-]{5,29})\b",
+          def extrair_codigo(texto, elemento=None):
+              """Extrai o código completo, dando prioridade ao trecho formatado como código."""
+              texto = (texto or "").replace("\u200b", "").replace("\u200c", "").replace("\ufeff", "")
+
+              def validar(valor):
+                  valor = re.sub(r"\s+", "", valor or "").upper().strip("_-")
+                  if not 6 <= len(valor) <= 30:
+                      return None
+                  if valor in invalidos or not re.search(r"[A-Z]", valor) or not re.search(r"\d", valor):
+                      return None
+                  # Não aceita pedaços claramente incompletos terminando em hífen/underscore.
+                  return valor
+
+              # Telegram costuma marcar códigos em <code>; ler o nó inteiro evita pegar só um pedaço.
+              if elemento is not None:
+                  for no in elemento.select("code, pre"):
+                      candidato = validar(no.get_text("", strip=True))
+                      if candidato:
+                          return candidato
+
+              # Procura o valor logo após o rótulo, aceitando espaços/formatos entre o rótulo e o código.
+              rotulos = [
+                  r"(?:c[oó]digo(?:\s+do\s+cupom)?|cupom)\s*(?:[:=\-]\s*)+([A-Z0-9_-]{6,30})",
+                  r"(?:c[oó]digo(?:\s+do\s+cupom)?|cupom)\s+([A-Z0-9_-]{6,30})",
               ]
+              for padrao in rotulos:
+                  for m in re.finditer(padrao, texto, re.IGNORECASE):
+                      candidato = validar(m.group(1))
+                      if candidato:
+                          return candidato
 
-              for padrao in padroes:
-                  for resultado in re.finditer(padrao, texto, re.IGNORECASE):
-                      codigo = resultado.group(1).upper().strip().strip("_-")
-                      if codigo in invalidos:
-                          continue
-                      if not re.search(r"[A-Z]", codigo) or not re.search(r"\d", codigo):
-                          continue
-                      if not 6 <= len(codigo) <= 30:
-                          continue
-                      return codigo
+              # Códigos publicados antes do desconto ou da informação de usos.
+              padroes_contexto = [
+                  r"\b([A-Z0-9][A-Z0-9_-]{5,29})\b(?=\s*[:|–-]?\s*R\$\s*\d)",
+                  r"\b([A-Z0-9][A-Z0-9_-]{5,29})\b(?=.{0,60}\b(?:restam|usos|expira|v[aá]lido)\b)",
+                  r"R\$\s*\d+(?:[,.]\d+)?\s*OFF.{0,100}?\b([A-Z0-9][A-Z0-9_-]{5,29})\b",
+              ]
+              for padrao in padroes_contexto:
+                  for m in re.finditer(padrao, texto, re.IGNORECASE):
+                      candidato = validar(m.group(1))
+                      if candidato:
+                          return candidato
 
-              # Fallback conservador: só considera uma linha isolada que pareça
-              # um código (letras e números), sem capturar palavras do texto corrido.
-              for linha in texto.splitlines():
-                  linha = linha.strip()
-                  if not re.fullmatch(r"[A-Z][A-Z0-9_-]{5,29}", linha, re.IGNORECASE):
-                      continue
-                  codigo = linha.upper()
-                  if codigo in invalidos:
-                      continue
-                  if re.search(r"[A-Z]", codigo) and re.search(r"\d", codigo):
-                      return codigo
+              # Último recurso: tokens completos com letras e números; prefere o mais longo,
+              # para não publicar uma parte curta quando o código está colado a outro texto.
+              tokens = re.findall(r"(?<![A-Z0-9_-])[A-Z0-9][A-Z0-9_-]{5,29}(?![A-Z0-9_-])", texto, re.IGNORECASE)
+              candidatos = []
+              for token in tokens:
+                  candidato = validar(token)
+                  if candidato and candidato not in candidatos:
+                      candidatos.append(candidato)
+              if candidatos:
+                  return max(candidatos, key=len)
               return None
 
           def extrair_desconto(texto):
@@ -220,7 +237,7 @@ jobs:
                   if not links_shopee:
                       print(f"Ignorado sem link Shopee reconhecido: {canal}")
                       continue
-                  codigo = extrair_codigo(texto)
+                  codigo = extrair_codigo(texto, no_texto)
                   desconto = extrair_desconto(texto)
                   if not codigo:
                       print(f"Ignorado: codigo nao identificado em {canal}")
@@ -264,7 +281,7 @@ jobs:
                               "disable_web_page_preview": True,
                               "reply_markup": {
                                   "inline_keyboard": [[{
-                                      "text": "🟢 RESGATAR CUPOM NA SHOPEE",
+                                      "text": "✅ RESGATAR CUPOM",
                                       "url": link
                                   }]]
                               }
@@ -299,5 +316,3 @@ jobs:
 
           print(f"Execucao concluida. Novos cupons: {len(total_novos)}")
           PY
-
-

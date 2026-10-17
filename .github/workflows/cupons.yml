@@ -80,38 +80,78 @@ jobs:
               )
 
           def extrair_links(postagem):
-              encontrados = []
-              # Procura links em toda a publicação, não apenas no texto do cupom.
+              prioritarios = []
+              outros = []
+
               for a in postagem.select("a[href]"):
                   link = (a.get("href") or "").strip()
-                  if link.startswith(("https://", "http://")) and eh_link_shopee(link):
-                      if link not in encontrados:
-                          encontrados.append(link)
-              # Também reconhece links que aparecem como texto simples.
-              urls = re.findall(r"https?://[^\s<>\"']+", postagem.get_text(" ", strip=True))
+                  if not link.startswith(("https://", "http://")) or not eh_link_shopee(link):
+                      continue
+
+                  rotulo = " ".join([
+                      a.get_text(" ", strip=True),
+                      a.get("aria-label", ""),
+                      a.get("title", ""),
+                  ]).lower()
+
+                  # Não usar link de carrinho nem link direto de produto como resgate.
+                  if "carrinho" in rotulo or "/product/" in link.lower():
+                      continue
+
+                  if any(palavra in rotulo for palavra in ("resgate", "usar cupom", "resgatar", "usar")):
+                      if link not in prioritarios:
+                          prioritarios.append(link)
+                  elif link not in outros:
+                      outros.append(link)
+
+              # Se o link está escrito no corpo do post, tenta priorizar o que vem
+              # depois de "Resgate" / "Resgate aqui".
+              texto = postagem.get_text(" ", strip=True)
+              urls = re.findall(r"https?://[^\s<>\"']+", texto)
               for link in urls:
                   link = link.rstrip(").,;!?]")
-                  if eh_link_shopee(link) and link not in encontrados:
-                      encontrados.append(link)
-              return encontrados
+                  if not eh_link_shopee(link) or "/product/" in link.lower():
+                      continue
+                  if link not in prioritarios and link not in outros:
+                      outros.append(link)
+
+              return prioritarios + outros
 
           def extrair_codigo(texto):
+              # Primeiro, prioriza rótulos explícitos e formatos conhecidos dos canais.
               padroes = [
-                  r"(?:código|codigo)\s*(?:do\s+cupom)?\s*[:=\-]?\s*([A-Z0-9_-]{5,30})",
-                  r"\bcupom\s*[:=\-]\s*([A-Z0-9_-]{5,30})",
-                  r"\b([A-Z0-9_-]{6,30})\s*:\s*R\$",
-                  r"\b([A-Z0-9_-]{6,30})\s+(?=.{0,45}R\$\s*\d)",
-                  r"R\$\s*\d+(?:[,.]\d+)?\s*OFF.{0,100}?\b([A-Z][A-Z0-9_-]{5,29})\b",
-                  # Código isolado em linha própria, com letras e números.
-                  r"(?<![A-Z0-9])([A-Z][A-Z0-9_-]{5,29})(?![A-Z0-9])",
+                  r"(?:código|codigo)\s*(?:do\s+cupom)?\s*[:=\-]?\s*([A-Z0-9_-]{6,30})",
+                  r"\bcupom\s*[:=\-]\s*([A-Z0-9_-]{6,30})",
+                  r"\b([A-Z0-9_-]{6,30})\s*:\s*R\$\s*\d",
+                  # Ex.: D1AD3CUPOM10 antes de "Restam X% dos usos".
+                  r"\b([A-Z][A-Z0-9_-]{5,29})\b(?=.{0,45}(?:restam|usos|válido|valido|expira))",
+                  # Ex.: código antes do desconto na mesma linha.
+                  r"\b([A-Z][A-Z0-9_-]{5,29})\s*[:\-]\s*R\$\s*\d",
+                  # Ex.: "R$20 OFF em R$60: 4DMD4CUPOM".
+                  r"R\$\s*\d+(?:[,.]\d+)?\s*OFF.{0,70}?\b([A-Z][A-Z0-9_-]{5,29})\b",
               ]
+
               for padrao in padroes:
                   for resultado in re.finditer(padrao, texto, re.IGNORECASE):
                       codigo = resultado.group(1).upper().strip().strip("_-")
-                      if codigo in invalidos or not re.search(r"[A-Z]", codigo):
+                      if codigo in invalidos:
                           continue
-                      if not re.search(r"\d", codigo) or not 6 <= len(codigo) <= 30:
+                      if not re.search(r"[A-Z]", codigo) or not re.search(r"\d", codigo):
                           continue
+                      if not 6 <= len(codigo) <= 30:
+                          continue
+                      return codigo
+
+              # Fallback conservador: só considera uma linha isolada que pareça
+              # um código (letras e números), sem capturar palavras do texto corrido.
+              for linha in texto.splitlines():
+                  linha = linha.strip()
+                  if not re.fullmatch(r"[A-Z][A-Z0-9_-]{5,29}", linha, re.IGNORECASE):
+                      continue
+                  codigo = linha.upper()
+                  if codigo in invalidos:
+                      continue
+                  if re.search(r"[A-Z]", codigo) and re.search(r"\d", codigo):
                       return codigo
               return None
 
@@ -259,3 +299,5 @@ jobs:
 
           print(f"Execucao concluida. Novos cupons: {len(total_novos)}")
           PY
+
+

@@ -206,7 +206,7 @@ jobs:
                       mensagem += f"🛒 <b>Compra mínima:</b> {html.escape(minimo)}\n"
                   mensagem += (
                       "\n━━━━━━━━━━━━━━━━━━\n"
-                      "🏷️ <b>SEU CÓDIGO DE CUPOM:</b>\n\n"
+                      "🏷️ <b>CÓDIGO DE CUPOM:</b>\n\n"
                       f"🎟️ <code>{html.escape(codigo)}</code>\n"
                       "━━━━━━━━━━━━━━━━━━\n\n"
                       "👇 <b>TOQUE NO BOTÃO ABAIXO PARA RESGATAR</b> 👇\n\n"

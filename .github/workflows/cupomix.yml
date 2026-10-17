@@ -1,4 +1,3 @@
-
 name: Cupomix - Ofertas Shopee
 
 on:
@@ -29,7 +28,7 @@ jobs:
       - name: Instalar dependências
         run: pip install requests
 
-      - name: Buscar oferta e publicar somente com link afiliado válido
+      - name: Buscar oferta e publicar com link de afiliado
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
@@ -44,12 +43,11 @@ jobs:
           import requests
           from pathlib import Path
           from decimal import Decimal, InvalidOperation
+          from html import escape
+          from urllib.parse import urlparse
 
           API_URL = "https://open-api.affiliate.shopee.com.br/graphql"
-          TELEGRAM_URL = (
-              f"https://api.telegram.org/bot"
-              f"{os.environ['BOT_TOKEN']}"
-          )
+          TELEGRAM_URL = f"https://api.telegram.org/bot{os.environ['BOT_TOKEN']}"
           HISTORY_FILE = Path("historico.json")
 
           APP_ID = os.environ["SHOPEE_APP_ID"]
@@ -57,18 +55,13 @@ jobs:
 
           def request_shopee(query):
               timestamp = str(int(time.time()))
-
-              # A assinatura usa exatamente o corpo enviado.
               body = json.dumps(
                   {"query": query},
                   separators=(",", ":"),
                   ensure_ascii=False
               )
-
               base = APP_ID + timestamp + body + SECRET
-              signature = hashlib.sha256(
-                  base.encode("utf-8")
-              ).hexdigest()
+              signature = hashlib.sha256(base.encode("utf-8")).hexdigest()
 
               headers = {
                   "Content-Type": "application/json",
@@ -97,23 +90,17 @@ jobs:
               return data.get("data") or {}
 
           def gerar_link_afiliado(link_produto):
-              if not isinstance(link_produto, str):
+              if not isinstance(link_produto, str) or not link_produto.startswith("https://"):
                   return None
 
-              if not link_produto.startswith("https://"):
-                  return None
-
-              url_json = json.dumps(
-                  link_produto, ensure_ascii=False
-              )
-
+              url_json = json.dumps(link_produto, ensure_ascii=False)
               query = (
-                  'mutation { '
-                  'generateShortLink(input: { '
-                  f'originUrl: {url_json}, '
+                  "mutation { "
+                  "generateShortLink(input: { "
+                  f"originUrl: {url_json}, "
                   'subIds: ["cupomix", "telegram"] '
-                  '}) { shortLink } '
-                  '}'
+                  "}) { shortLink } "
+                  "}"
               )
 
               try:
@@ -121,28 +108,20 @@ jobs:
                   resultado = data.get("generateShortLink") or {}
                   link_curto = resultado.get("shortLink")
 
-                  # Não aceita campo vazio ou link que não seja HTTPS.
                   if not isinstance(link_curto, str):
                       return None
 
                   link_curto = link_curto.strip()
-
-                  if not link_curto.startswith("https://"):
+                  if not link_curto.startswith("https://") or any(c.isspace() for c in link_curto):
                       return None
 
-                  if any(c.isspace() for c in link_curto):
-                      return None
-
-                  # Exige domínio de link curto da Shopee.
-                  from urllib.parse import urlparse
                   host = (urlparse(link_curto).hostname or "").lower()
-
                   if not (
                       host == "s.shopee.com.br"
                       or host.endswith(".shope.ee")
                       or host.endswith(".shopee.com.br")
                   ):
-                      print("Link retornado não reconhecido como link curto Shopee.")
+                      print("Link retornado não passou pela validação de domínio.")
                       return None
 
                   return link_curto
@@ -171,9 +150,7 @@ jobs:
               if not HISTORY_FILE.exists():
                   return []
               try:
-                  dados = json.loads(
-                      HISTORY_FILE.read_text(encoding="utf-8")
-                  )
+                  dados = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
                   return dados if isinstance(dados, list) else []
               except (json.JSONDecodeError, OSError):
                   return []
@@ -184,19 +161,16 @@ jobs:
           produto_escolhido = None
           link_afiliado_escolhido = None
 
-          # Busca produtos e só seleciona um depois de gerar
-          # com sucesso um link curto de afiliado.
+          # Só escolhe uma oferta depois de gerar um link curto.
           for pagina in range(1, 11):
               query = (
-                  'query { '
-                  'productOfferV2('
-                  f'page: {pagina}, limit: 50'
-                  ') { '
-                  'nodes { '
-                  'productName price imageUrl productLink '
-                  '} '
-                  '} '
-                  '}'
+                  "query { "
+                  "productOfferV2("
+                  f"page: {pagina}, limit: 50"
+                  ") { "
+                  "nodes { productName price imageUrl productLink } "
+                  "} "
+                  "}"
               )
 
               try:
@@ -210,18 +184,12 @@ jobs:
 
               for produto in produtos:
                   link_original = produto.get("productLink")
-
                   if not link_original or link_original in historico_set:
                       continue
 
-                  # Regra principal: não publicar sem link afiliado.
                   link_afiliado = gerar_link_afiliado(link_original)
-
                   if not link_afiliado:
-                      print(
-                          "Oferta ignorada: não foi possível validar "
-                          "o link afiliado."
-                      )
+                      print("Oferta ignorada: não foi possível gerar um link afiliado válido.")
                       continue
 
                   produto_escolhido = produto
@@ -232,10 +200,7 @@ jobs:
                   break
 
           if not produto_escolhido:
-              print(
-                  "Nenhuma oferta com link afiliado válido encontrada. "
-                  "Nada será publicado."
-              )
+              print("Nenhuma oferta nova com link afiliado válido. Nada será publicado.")
               raise SystemExit(0)
 
           produto = produto_escolhido
@@ -251,53 +216,60 @@ jobs:
           except (InvalidOperation, ValueError, TypeError):
               preco_formatado = None
 
-          legenda = f"🔥 OFERTA SHOPEE 🔥\n\n{nome}\n"
+          nome_seguro = escape(nome)
+          link_seguro = escape(link_afiliado, quote=True)
 
-          if preco_formatado:
-              legenda += f"\n💰 Preço: R$ {preco_formatado}\n"
-
-          legenda += (
-              "\n🛒 Link de afiliado:\n"
-              f"{link_afiliado}\n\n"
-              "📌 O preço e a disponibilidade podem mudar."
+          legenda = (
+              "🔥 <b>OFERTA SHOPEE</b> 🔥\n\n"
+              f"🛍️ <b>{nome_seguro}</b>\n\n"
           )
 
-          # Telegram permite até 1024 caracteres na legenda da foto.
-          legenda = legenda[:1000]
+          if preco_formatado:
+              legenda += f"💰 <b>Preço: R$ {preco_formatado}</b>\n\n"
 
-          teclado = {
-              "inline_keyboard": [[
-                  {
-                      "text": "🛒 COMPRAR AGORA",
-                      "url": link_afiliado
-                  }
-              ]]
-          }
+          legenda += (
+              "👇 Confira a oferta:\n"
+              f'<a href="{link_seguro}">{escape(link_afiliado)}</a>\n\n'
+              "⚡ Preço e disponibilidade podem mudar.\n\n"
+              "🧡 <i>Cupomix • Seus achadinhos favoritos</i>"
+          )
 
-          # Não usa o link original em nenhum botão ou publicação.
+          # Mantém a legenda abaixo do limite do Telegram.
+          if len(legenda) > 1000:
+              legenda = (
+                  "🔥 <b>OFERTA SHOPEE</b> 🔥\n\n"
+                  f"🛍️ <b>{escape(nome[:220])}</b>\n\n"
+                  + (f"💰 <b>Preço: R$ {preco_formatado}</b>\n\n" if preco_formatado else "")
+                  + "👇 Confira a oferta:\n"
+                  + f'<a href="{link_seguro}">Clique aqui para ver a oferta</a>\n\n'
+                  + "⚡ Preço e disponibilidade podem mudar.\n\n"
+                  + "🧡 <i>Cupomix • Seus achadinhos favoritos</i>"
+              )
+
+          # Link aparece na própria mensagem; sem botão de compra.
           if imagem and str(imagem).startswith("https://"):
               resposta = enviar_telegram("sendPhoto", {
                   "chat_id": os.environ["CHAT_ID"],
                   "photo": imagem,
                   "caption": legenda,
-                  "reply_markup": teclado
+                  "parse_mode": "HTML"
               })
           else:
               resposta = enviar_telegram("sendMessage", {
                   "chat_id": os.environ["CHAT_ID"],
                   "text": legenda,
-                  "reply_markup": teclado,
+                  "parse_mode": "HTML",
                   "disable_web_page_preview": False
               })
 
-          # Registra no histórico somente depois da publicação.
+          # Só registra a oferta depois que o Telegram confirma o envio.
           historico.append(produto["productLink"])
           HISTORY_FILE.write_text(
               json.dumps(historico[-2000:], ensure_ascii=False, indent=2),
               encoding="utf-8"
           )
 
-          print("Oferta publicada com link afiliado.")
+          print("Oferta publicada com link curto gerado pela API.")
           print(f"Mensagem Telegram ID: {resposta['result']['message_id']}")
           PY
 

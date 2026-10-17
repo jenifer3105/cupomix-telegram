@@ -253,7 +253,13 @@ jobs:
 
                   tipo = classificar_tipo(texto)
                   minimo = extrair_minimo(texto)
-                  link = links_shopee[0]
+                  # Links diretos escolhidos conforme a categoria do cupom.
+                  # O link aparece no texto, sem botão inline.
+                  if tipo == "💎 CUPOM VIP":
+                      link = "https://s.shopee.com.br/40aG8LLgaE"
+                  else:
+                      link = "https://s.shopee.com.br/1qU7Zs67MB"
+
                   mensagem = (
                       f"<b>{tipo}</b>\n\n"
                       "💰 <b>VOCÊ ECONOMIZA!</b>\n"
@@ -266,7 +272,8 @@ jobs:
                       "🏷️ <b>CÓDIGO DE CUPOM:</b>\n\n"
                       f"🎟️ <code>{html.escape(codigo)}</code>\n"
                       "━━━━━━━━━━━━━━━━━━\n\n"
-                      "👇 <b>TOQUE NO BOTÃO ABAIXO PARA RESGATAR</b> 👇\n\n"
+                      "👇 <b>RESGATE SEU CUPOM AQUI:</b> 👇\n"
+                      f"{html.escape(link)}\n\n"
                       "⚠️ Confira as condições e a disponibilidade do cupom na Shopee.\n\n"
                       "🧡 <i>Cupomix • Seus achadinhos favoritos</i>"
                   )
@@ -278,13 +285,7 @@ jobs:
                               "chat_id": chat_id,
                               "text": mensagem,
                               "parse_mode": "HTML",
-                              "disable_web_page_preview": True,
-                              "reply_markup": {
-                                  "inline_keyboard": [[{
-                                      "text": "✅ RESGATAR CUPOM",
-                                      "url": link
-                                  }]]
-                              }
+                              "disable_web_page_preview": True
                           },
                           timeout=30
                       )

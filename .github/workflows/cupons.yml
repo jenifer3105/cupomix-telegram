@@ -38,6 +38,7 @@ jobs:
           import json
           import html
           import subprocess
+          from datetime import datetime, timezone, timedelta
           from pathlib import Path
           from urllib.parse import urlparse
           import requests
@@ -200,6 +201,8 @@ jobs:
               return "🎟️ CUPOM NORMAL"
 
           total_novos = []
+          agora = datetime.now(timezone.utc)
+          janela = timedelta(hours=3)
 
           for canal in canais:
               print(f"Consultando canal: {canal}")
@@ -215,6 +218,27 @@ jobs:
               print(f"Publicações visíveis em {canal}: {len(postagens)}")
 
               for postagem in postagens:
+                  # Processa apenas publicações recentes para não despejar o histórico
+                  # inteiro no canal na primeira execução após esta correção.
+                  cartao = postagem.select_one(".tgme_widget_message") or postagem
+                  referencia = cartao.get("data-post", "")
+                  partes = referencia.rsplit("/", 1)
+                  id_post = partes[-1] if len(partes) == 2 and partes[-1].isdigit() else None
+                  data_elemento = postagem.select_one(".tgme_widget_message_date time[datetime]")
+                  data_texto = data_elemento.get("datetime") if data_elemento else None
+                  if not data_texto:
+                      print(f"Ignorado sem data verificavel: {canal}")
+                      continue
+                  try:
+                      data_post = datetime.fromisoformat(data_texto.replace("Z", "+00:00"))
+                      if data_post.tzinfo is None:
+                          data_post = data_post.replace(tzinfo=timezone.utc)
+                  except ValueError:
+                      print(f"Ignorado com data invalida: {canal}")
+                      continue
+                  if agora - data_post > janela or data_post > agora + timedelta(minutes=10):
+                      continue
+
                   no_texto = postagem.select_one(".tgme_widget_message_text")
                   if not no_texto:
                       continue
@@ -246,9 +270,12 @@ jobs:
                       print(f"Ignorado: desconto nao identificado para {codigo}")
                       continue
 
-                  identidade = "codigo:" + codigo
+                  # Deduplica pela publicação de origem, não apenas pelo código.
+                  # Assim, um código que reaparece numa nova publicação pode voltar
+                  # a ser divulgado, sem republicar a mesma mensagem a cada hora.
+                  identidade = f"post:{canal}:{id_post}" if id_post else "codigo:" + codigo
                   if identidade in publicados:
-                      print(f"Duplicado ignorado: {codigo}")
+                      print(f"Publicacao duplicada ignorada: {canal}/{id_post or codigo}")
                       continue
 
                   tipo = classificar_tipo(texto)

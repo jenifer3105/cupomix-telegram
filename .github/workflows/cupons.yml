@@ -203,6 +203,8 @@ jobs:
           total_novos = []
           agora = datetime.now(timezone.utc)
           janela = timedelta(hours=3)
+          print(f"Horario de referencia UTC: {agora.isoformat()}")
+          print(f"Janela de busca: ultimas {janela.total_seconds() / 3600:g} horas")
 
           for canal in canais:
               print(f"Consultando canal: {canal}")
@@ -236,11 +238,24 @@ jobs:
                   except ValueError:
                       print(f"Ignorado com data invalida: {canal}")
                       continue
-                  if agora - data_post > janela or data_post > agora + timedelta(minutes=10):
+                  idade = agora - data_post
+                  if idade > janela:
+                      print(
+                          f"Ignorado por antiguidade: {canal}/{id_post or '?'} "
+                          f"| data={data_post.isoformat()} "
+                          f"| idade_horas={idade.total_seconds() / 3600:.2f}"
+                      )
+                      continue
+                  if data_post > agora + timedelta(minutes=10):
+                      print(
+                          f"Ignorado por data futura: {canal}/{id_post or '?'} "
+                          f"| data={data_post.isoformat()}"
+                      )
                       continue
 
                   no_texto = postagem.select_one(".tgme_widget_message_text")
                   if not no_texto:
+                      print(f"Ignorado sem texto: {canal}/{id_post or '?'}")
                       continue
                   texto = no_texto.get_text(" ", strip=True)
                   # Aceita cupons mesmo quando a mensagem não usa a palavra "cupom".

@@ -49,10 +49,34 @@ jobs:
           arquivo = Path("robo_cupons/cupons.json")
           arquivo.parent.mkdir(parents=True, exist_ok=True)
 
+          # Historico: codigo do cupom -> horario UTC da ultima publicacao.
+          # Migra o formato antigo (lista de identificadores) sem quebrar a execucao.
+          agora = datetime.now(timezone.utc)
+          limite_duplicidade = timedelta(hours=24)
           try:
-              publicados = set(json.loads(arquivo.read_text(encoding="utf-8")))
+              historico_bruto = json.loads(arquivo.read_text(encoding="utf-8"))
           except (FileNotFoundError, json.JSONDecodeError, OSError):
-              publicados = set()
+              historico_bruto = {}
+
+          publicados = {}
+          if isinstance(historico_bruto, dict):
+              for codigo_antigo, horario in historico_bruto.items():
+                  try:
+                      momento = datetime.fromisoformat(str(horario).replace("Z", "+00:00"))
+                      if momento.tzinfo is None:
+                          momento = momento.replace(tzinfo=timezone.utc)
+                      if agora - momento <= limite_duplicidade and momento <= agora + timedelta(minutes=10):
+                          publicados[str(codigo_antigo).upper()] = momento.astimezone(timezone.utc).isoformat()
+                  except (TypeError, ValueError):
+                      continue
+          elif isinstance(historico_bruto, list):
+              # Mantem codigos antigos conhecidos por 24h; IDs de posts antigos
+              # nao permitem recuperar com seguranca o codigo que continham.
+              for item in historico_bruto:
+                  if isinstance(item, str) and item.startswith("codigo:"):
+                      codigo_antigo = item.split(":", 1)[1].strip().upper()
+                      if codigo_antigo:
+                          publicados[codigo_antigo] = agora.isoformat()
 
           canais = ["cuponsvoltando", "fadadoscupons", "afiliadosshopeebroficial"]
           sessao = requests.Session()
@@ -201,7 +225,7 @@ jobs:
               return "🎟️ CUPOM NORMAL"
 
           total_novos = []
-          agora = datetime.now(timezone.utc)
+          codigos_nesta_execucao = set()
           janela = timedelta(hours=3)
           print(f"Horario de referencia UTC: {agora.isoformat()}")
           print(f"Janela de busca: ultimas {janela.total_seconds() / 3600:g} horas")
@@ -285,13 +309,29 @@ jobs:
                       print(f"Ignorado: desconto nao identificado para {codigo}")
                       continue
 
-                  # Deduplica pela publicação de origem, não apenas pelo código.
-                  # Assim, um código que reaparece numa nova publicação pode voltar
-                  # a ser divulgado, sem republicar a mesma mensagem a cada hora.
-                  identidade = f"post:{canal}:{id_post}" if id_post else "codigo:" + codigo
-                  if identidade in publicados:
-                      print(f"Publicacao duplicada ignorada: {canal}/{id_post or codigo}")
+                  # Deduplica pelo codigo em todos os canais e durante esta execucao.
+                  # O mesmo codigo pode voltar a ser publicado apos 24 horas.
+                  codigo_chave = re.sub(r"\s+", "", codigo).upper()
+                  if codigo_chave in codigos_nesta_execucao:
+                      print(f"Cupom duplicado nesta execucao ignorado: {codigo_chave}")
                       continue
+                  horario_anterior = publicados.get(codigo_chave)
+                  if horario_anterior:
+                      try:
+                          momento_anterior = datetime.fromisoformat(horario_anterior.replace("Z", "+00:00"))
+                          if momento_anterior.tzinfo is None:
+                              momento_anterior = momento_anterior.replace(tzinfo=timezone.utc)
+                          idade_cupom = agora - momento_anterior
+                          if idade_cupom < limite_duplicidade:
+                              restante = limite_duplicidade - idade_cupom
+                              print(
+                                  f"Cupom duplicado ignorado: {codigo_chave} "
+                                  f"| publicado ha {idade_cupom.total_seconds() / 3600:.2f}h "
+                                  f"| libera em {restante.total_seconds() / 3600:.2f}h"
+                              )
+                              continue
+                      except ValueError:
+                          pass
 
                   tipo = classificar_tipo(texto)
                   minimo = extrair_minimo(texto)
@@ -334,16 +374,23 @@ jobs:
                       envio.raise_for_status()
                       resultado = envio.json()
                       if resultado.get("ok"):
-                          publicados.add(identidade)
-                          total_novos.append(identidade)
+                          publicados[codigo_chave] = datetime.now(timezone.utc).isoformat()
+                          codigos_nesta_execucao.add(codigo_chave)
+                          total_novos.append(codigo_chave)
                           print(f"Publicado: {codigo} - {tipo}")
                       else:
                           print(f"Telegram recusou {codigo}: {resultado}")
                   except Exception as erro:
                       print(f"Erro ao publicar {codigo}: {erro}")
 
+          # Remove entradas que ja passaram de 24h para manter o historico enxuto.
+          agora_final = datetime.now(timezone.utc)
+          publicados = {
+              codigo: horario for codigo, horario in publicados.items()
+              if (agora_final - datetime.fromisoformat(horario.replace("Z", "+00:00"))).total_seconds() < limite_duplicidade.total_seconds()
+          }
           arquivo.write_text(
-              json.dumps(sorted(publicados), ensure_ascii=False, indent=2) + "\n",
+              json.dumps(publicados, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
               encoding="utf-8"
           )
 
